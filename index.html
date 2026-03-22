@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Stack Tower</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:#1a1a2e;overflow:hidden;touch-action:none;
+  -webkit-user-select:none;user-select:none;
+  font-family:'Helvetica Neue',Arial,sans-serif;
+  display:flex;justify-content:center;align-items:center;
+  height:100dvh;width:100vw;
+}
+canvas{display:block}
+
+/* Overlays */
+.ov{
+  position:fixed;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:16px;z-index:10;
+  background:rgba(10,10,20,.92);
+}
+.ov.hidden{display:none}
+.ov h1{font-size:42px;font-weight:900;letter-spacing:-1px}
+.ov h2{font-size:28px;font-weight:800}
+.ov .sub{font-size:14px;color:#aaa;text-align:center;max-width:260px;line-height:1.4}
+.ov .score-big{font-size:64px;font-weight:900}
+.ov .best{font-size:16px;color:#aaa}
+.ov button{
+  background:#fff;color:#111;border:none;padding:16px 48px;
+  font-size:18px;font-weight:800;border-radius:50px;cursor:pointer;
+  letter-spacing:0.5px;-webkit-tap-highlight-color:transparent;
+  box-shadow:0 4px 20px rgba(255,255,255,.15);
+}
+.ov button:active{transform:scale(.96);opacity:.9}
+
+/* HUD */
+#hud{
+  position:fixed;top:0;left:0;right:0;
+  display:flex;justify-content:space-between;align-items:flex-start;
+  padding:max(env(safe-area-inset-top),12px) 20px 0 20px;
+  pointer-events:none;z-index:5;
+}
+#hud .sc{font-size:48px;font-weight:900;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,.3)}
+#hud .combo{font-size:16px;font-weight:700;color:#ff0;opacity:0;transition:opacity .2s}
+#hud .combo.show{opacity:1}
+#hud .hi{font-size:13px;color:rgba(255,255,255,.4);font-weight:600}
+
+/* Perfect text popup */
+.perfect-pop{
+  position:fixed;left:50%;transform:translateX(-50%);
+  font-size:28px;font-weight:900;pointer-events:none;z-index:6;
+  animation:popUp .6s ease-out forwards;
+}
+@keyframes popUp{
+  0%{opacity:1;top:45%}
+  100%{opacity:0;top:30%}
+}
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<div id="hud" class="hidden">
+  <div>
+    <div class="sc" id="score-txt">0</div>
+    <div class="combo" id="combo-txt">PERFECT x0</div>
+  </div>
+  <div style="text-align:right">
+    <div class="hi" id="best-txt">BEST: 0</div>
+  </div>
+</div>
+
+<!-- Title -->
+<div class="ov" id="title">
+  <h1 style="color:#fff">STACK</h1>
+  <h1 style="color:#ff6b6b;margin-top:-16px">TOWER</h1>
+  <div class="sub">Tap to drop each block. Stack them perfectly to keep your platform wide. How high can you go?</div>
+  <button id="btn-play">TAP TO PLAY</button>
+</div>
+
+<!-- Game Over -->
+<div class="ov hidden" id="gameover">
+  <h2 style="color:#ff6b6b">GAME OVER</h2>
+  <div class="score-big" style="color:#fff" id="final-score">0</div>
+  <div class="best" id="final-best">BEST: 0</div>
+  <button id="btn-retry">TAP TO RETRY</button>
+</div>
+
+<script>
+// ═══════════════════════════════════════
+//  CANVAS
+// ═══════════════════════════════════════
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W;
+  canvas.height = H;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ═══════════════════════════════════════
+//  COLOR PALETTE — cycles with height
+// ═══════════════════════════════════════
+function hslColor(index) {
+  const hue = (index * 18 + 200) % 360;
+  const sat = 65 + Math.sin(index * 0.3) * 15;
+  const lit = 55 + Math.sin(index * 0.2) * 10;
+  return { h: hue, s: sat, l: lit };
+}
+
+function hsl(h, s, l) { return `hsl(${h},${s}%,${l}%)`; }
+
+// ═══════════════════════════════════════
+//  PARTICLES
+// ═══════════════════════════════════════
+let particles = [];
+
+function spawnParticles(x, y, w, h, color, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x: x + Math.random() * w,
+      y: y + Math.random() * h,
+      vx: (Math.random() - 0.5) * 8,
+      vy: -Math.random() * 6 - 2,
+      size: 2 + Math.random() * 4,
+      color,
+      life: 1,
+      decay: 0.015 + Math.random() * 0.02,
+      gravity: 0.15 + Math.random() * 0.1,
+    });
+  }
+}
+
+function spawnPerfectBurst(y) {
+  for (let i = 0; i < 30; i++) {
+    const angle = (i / 30) * Math.PI * 2;
+    const speed = 3 + Math.random() * 4;
+    particles.push({
+      x: W / 2, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 2,
+      size: 2 + Math.random() * 3,
+      color: `hsl(${Math.random()*60+30},100%,70%)`,
+      life: 1,
+      decay: 0.02,
+      gravity: 0.08,
+    });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += p.gravity;
+    p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x, p.y, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ═══════════════════════════════════════
+//  SCREEN SHAKE
+// ═══════════════════════════════════════
+let shakeX = 0, shakeY = 0, shakeIntensity = 0, shakeDur = 0;
+
+function triggerShake(intensity, duration) {
+  shakeIntensity = intensity;
+  shakeDur = duration;
+}
+
+function updateShake(dt) {
+  if (shakeDur > 0) {
+    shakeDur -= dt;
+    const t = shakeIntensity * (shakeDur > 0 ? 1 : 0);
+    shakeX = (Math.random() - 0.5) * t * 2;
+    shakeY = (Math.random() - 0.5) * t * 2;
+  } else {
+    shakeX = 0; shakeY = 0;
+  }
+}
+
+// ═══════════════════════════════════════
+//  GAME STATE
+// ═══════════════════════════════════════
+const BLOCK_HEIGHT = 28;
+const BASE_WIDTH = 160;
+const BASE_SPEED = 2.5;
+const PERFECT_THRESHOLD = 4; // pixels tolerance for "perfect"
+
+let stack = [];       // placed blocks: {x, w, colorIdx}
+let moving = null;    // current sliding block: {x, w, dir, speed, colorIdx}
+let falling = [];     // sliced-off pieces: {x, y, w, vy, colorIdx, side}
+let score = 0;
+let combo = 0;        // consecutive perfects
+let bestScore = parseInt(localStorage.getItem('stack_best') || '0');
+let gameActive = false;
+let cameraY = 0;      // scrolls up as stack grows
+let targetCamY = 0;
+let bgStars = [];
+
+// Init background stars
+for (let i = 0; i < 80; i++) {
+  bgStars.push({
+    x: Math.random() * 2000,
+    y: Math.random() * 8000 - 4000,
+    size: 0.5 + Math.random() * 1.5,
+    alpha: 0.2 + Math.random() * 0.5,
+  });
+}
+
+function baseY() { return H - 60; } // where the base sits on screen
+
+function blockScreenY(idx) {
+  return baseY() - (idx + 1) * BLOCK_HEIGHT + cameraY;
+}
+
+function currentSpeed() {
+  return BASE_SPEED + score * 0.08 + Math.min(score, 50) * 0.04;
+}
+
+function startGame() {
+  stack = [];
+  falling = [];
+  particles = [];
+  score = 0;
+  combo = 0;
+  cameraY = 0;
+  targetCamY = 0;
+
+  // Base block
+  stack.push({ x: (W - BASE_WIDTH) / 2, w: BASE_WIDTH, colorIdx: 0 });
+
+  // First moving block
+  spawnMoving();
+
+  gameActive = true;
+  document.getElementById('title').classList.add('hidden');
+  document.getElementById('gameover').classList.add('hidden');
+  document.getElementById('hud').classList.remove('hidden');
+  updateHUD();
+}
+
+function spawnMoving() {
+  const prev = stack[stack.length - 1];
+  const colorIdx = stack.length;
+  const startRight = stack.length % 2 === 0;
+  moving = {
+    x: startRight ? W + 10 : -prev.w - 10,
+    w: prev.w,
+    dir: startRight ? -1 : 1,
+    speed: currentSpeed(),
+    colorIdx,
+  };
+}
+
+function dropBlock() {
+  if (!moving || !gameActive) return;
+
+  const prev = stack[stack.length - 1];
+  const m = moving;
+
+  // Calculate overlap
+  const overlapLeft = Math.max(m.x, prev.x);
+  const overlapRight = Math.min(m.x + m.w, prev.x + prev.w);
+  const overlapW = overlapRight - overlapLeft;
+
+  if (overlapW <= 0) {
+    // Complete miss — game over
+    falling.push({ x: m.x, y: blockScreenY(stack.length), w: m.w, vy: 0, colorIdx: m.colorIdx });
+    moving = null;
+    gameOver();
+    return;
+  }
+
+  const overhang = m.w - overlapW;
+
+  // Perfect detection
+  if (overhang <= PERFECT_THRESHOLD) {
+    // PERFECT — keep full width, snap to previous
+    stack.push({ x: prev.x, w: prev.w, colorIdx: m.colorIdx });
+    combo++;
+    score += 1 + combo; // bonus for streaks
+
+    // Juice!
+    spawnPerfectBurst(blockScreenY(stack.length - 1) + BLOCK_HEIGHT / 2);
+    triggerShake(3, 150);
+    showPerfectText();
+
+    // Grow block slightly on long streaks (max original BASE_WIDTH)
+    if (combo >= 3 && stack[stack.length-1].w < BASE_WIDTH) {
+      stack[stack.length-1].w = Math.min(BASE_WIDTH, stack[stack.length-1].w + 4);
+      stack[stack.length-1].x -= 2;
+    }
+  } else {
+    // Slice
+    combo = 0;
+    score++;
+    stack.push({ x: overlapLeft, w: overlapW, colorIdx: m.colorIdx });
+
+    // Falling slice
+    const col = hslColor(m.colorIdx);
+    if (m.x < prev.x) {
+      // Overhangs left
+      const sliceW = prev.x - m.x;
+      falling.push({ x: m.x, y: blockScreenY(stack.length - 1), w: sliceW, vy: 0, colorIdx: m.colorIdx });
+      spawnParticles(m.x, blockScreenY(stack.length - 1), sliceW, BLOCK_HEIGHT, hsl(col.h, col.s, col.l), 8);
+    }
+    if (m.x + m.w > prev.x + prev.w) {
+      // Overhangs right
+      const sliceX = prev.x + prev.w;
+      const sliceW = (m.x + m.w) - sliceX;
+      falling.push({ x: sliceX, y: blockScreenY(stack.length - 1), w: sliceW, vy: 0, colorIdx: m.colorIdx });
+      spawnParticles(sliceX, blockScreenY(stack.length - 1), sliceW, BLOCK_HEIGHT, hsl(col.h, col.s, col.l), 8);
+    }
+
+    triggerShake(2, 80);
+  }
+
+  // Camera
+  if (stack.length > 5) {
+    targetCamY = (stack.length - 5) * BLOCK_HEIGHT;
+  }
+
+  moving = null;
+  updateHUD();
+  setTimeout(spawnMoving, 150);
+}
+
+function gameOver() {
+  gameActive = false;
+  triggerShake(8, 300);
+
+  if (score > bestScore) {
+    bestScore = score;
+    localStorage.setItem('stack_best', bestScore);
+  }
+
+  setTimeout(() => {
+    document.getElementById('final-score').textContent = score;
+    document.getElementById('final-best').textContent = `BEST: ${bestScore}`;
+    document.getElementById('gameover').classList.remove('hidden');
+  }, 600);
+}
+
+function showPerfectText() {
+  const el = document.createElement('div');
+  el.className = 'perfect-pop';
+  const texts = combo >= 5 ? 'INSANE!' : combo >= 3 ? 'AMAZING!' : 'PERFECT!';
+  el.textContent = combo > 1 ? `${texts} x${combo}` : texts;
+  el.style.color = combo >= 5 ? '#ff0' : combo >= 3 ? '#0ff' : '#fff';
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 700);
+}
+
+function updateHUD() {
+  document.getElementById('score-txt').textContent = score;
+  document.getElementById('best-txt').textContent = `BEST: ${bestScore}`;
+  const comboEl = document.getElementById('combo-txt');
+  if (combo >= 2) {
+    comboEl.textContent = `PERFECT x${combo}`;
+    comboEl.classList.add('show');
+  } else {
+    comboEl.classList.remove('show');
+  }
+}
+
+// ═══════════════════════════════════════
+//  RENDER
+// ═══════════════════════════════════════
+function drawBlock(x, y, w, h, colorIdx, alpha = 1) {
+  const col = hslColor(colorIdx);
+  ctx.globalAlpha = alpha;
+
+  // Top face (lighter)
+  ctx.fillStyle = hsl(col.h, col.s, col.l + 12);
+  ctx.fillRect(x, y, w, 6);
+
+  // Front face
+  ctx.fillStyle = hsl(col.h, col.s, col.l);
+  ctx.fillRect(x, y + 6, w, h - 6);
+
+  // Left edge (darker)
+  ctx.fillStyle = hsl(col.h, col.s, col.l - 10);
+  ctx.fillRect(x, y, 3, h);
+
+  // Right edge highlight
+  ctx.fillStyle = hsl(col.h, col.s, col.l + 5);
+  ctx.fillRect(x + w - 2, y, 2, h);
+
+  // Bottom shadow
+  ctx.fillStyle = hsl(col.h, col.s, col.l - 15);
+  ctx.fillRect(x, y + h - 2, w, 2);
+
+  ctx.globalAlpha = 1;
+}
+
+function drawBackground() {
+  // Gradient background that shifts with height
+  const hueShift = (score * 3) % 360;
+  const grd = ctx.createLinearGradient(0, 0, 0, H);
+  grd.addColorStop(0, hsl((220 + hueShift) % 360, 40, 8));
+  grd.addColorStop(1, hsl((240 + hueShift) % 360, 50, 15));
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars
+  for (const s of bgStars) {
+    const sy = ((s.y + cameraY * 0.3) % (H + 200)) - 100;
+    ctx.globalAlpha = s.alpha * 0.6;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(s.x % W, sy, s.size, s.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+let lastTime = 0;
+
+function frame(time) {
+  const dt = Math.min(time - (lastTime || time), 33);
+  lastTime = time;
+
+  // Smooth camera
+  cameraY += (targetCamY - cameraY) * 0.1;
+
+  updateShake(dt);
+  updateParticles(dt);
+
+  ctx.save();
+  ctx.translate(shakeX, shakeY);
+
+  drawBackground();
+
+  // ── Draw base platform ──
+  const baseScreenY = baseY();
+  ctx.fillStyle = '#333';
+  ctx.fillRect(0, baseScreenY + BLOCK_HEIGHT, W, H);
+  // Base subtle grid
+  ctx.fillStyle = '#3a3a3a';
+  for (let gx = 0; gx < W; gx += 20) {
+    ctx.fillRect(gx, baseScreenY + BLOCK_HEIGHT, 1, H);
+  }
+
+  // ── Draw stack ──
+  for (let i = 0; i < stack.length; i++) {
+    const b = stack[i];
+    const sy = baseY() - (i + 1) * BLOCK_HEIGHT + cameraY;
+    if (sy > H + BLOCK_HEIGHT || sy < -BLOCK_HEIGHT) continue;
+    drawBlock(b.x, sy, b.w, BLOCK_HEIGHT, b.colorIdx);
+  }
+
+  // ── Draw moving block ──
+  if (moving) {
+    moving.x += moving.dir * moving.speed;
+    // Bounce
+    if (moving.x + moving.w > W + 50) moving.dir = -1;
+    if (moving.x < -50) moving.dir = 1;
+
+    const my = blockScreenY(stack.length);
+    drawBlock(moving.x, my, moving.w, BLOCK_HEIGHT, moving.colorIdx);
+
+    // Drop guide line (subtle)
+    const prev = stack[stack.length - 1];
+    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(prev.x, my + BLOCK_HEIGHT, 1, baseY() - my);
+    ctx.fillRect(prev.x + prev.w - 1, my + BLOCK_HEIGHT, 1, baseY() - my);
+    ctx.globalAlpha = 1;
+  }
+
+  // ── Falling slices ──
+  for (let i = falling.length - 1; i >= 0; i--) {
+    const f = falling[i];
+    f.vy += 0.4;
+    f.y += f.vy;
+    if (f.y > H + 100) { falling.splice(i, 1); continue; }
+    drawBlock(f.x, f.y, f.w, BLOCK_HEIGHT, f.colorIdx, Math.max(0, 1 - f.vy * 0.03));
+  }
+
+  drawParticles();
+
+  ctx.restore();
+
+  requestAnimationFrame(frame);
+}
+
+// ═══════════════════════════════════════
+//  INPUT
+// ═══════════════════════════════════════
+function onTap(e) {
+  e.preventDefault();
+  if (!gameActive) return;
+  dropBlock();
+}
+
+canvas.addEventListener('touchstart', onTap, { passive: false });
+canvas.addEventListener('mousedown', onTap);
+document.addEventListener('keydown', (e) => {
+  if (e.key === ' ' && gameActive) { e.preventDefault(); dropBlock(); }
+});
+
+document.getElementById('btn-play').addEventListener('click', startGame);
+document.getElementById('btn-retry').addEventListener('click', startGame);
+
+// Start render loop
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
