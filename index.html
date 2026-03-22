@@ -59,6 +59,46 @@ canvas{display:block}
   0%{opacity:1;top:45%}
   100%{opacity:0;top:30%}
 }
+
+/* Sound & BG controls */
+#controls{
+  position:fixed;bottom:0;left:0;right:0;
+  display:flex;justify-content:center;align-items:center;gap:10px;
+  padding:0 16px max(env(safe-area-inset-bottom),12px) 16px;
+  pointer-events:all;z-index:15;
+}
+.ctrl-btn{
+  background:rgba(255,255,255,.12);color:#fff;border:none;
+  width:44px;height:44px;border-radius:50%;font-size:20px;
+  cursor:pointer;-webkit-tap-highlight-color:transparent;
+  display:flex;align-items:center;justify-content:center;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  transition:background .2s;
+}
+.ctrl-btn:active{background:rgba(255,255,255,.25)}
+.ctrl-btn.off{opacity:.4}
+
+/* Background picker overlay */
+#bg-picker{
+  position:fixed;bottom:70px;left:50%;transform:translateX(-50%);
+  background:rgba(15,15,30,.95);border-radius:16px;padding:14px;
+  display:none;flex-wrap:wrap;gap:10px;justify-content:center;
+  z-index:20;max-width:300px;
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border:1px solid rgba(255,255,255,.1);
+}
+#bg-picker.show{display:flex}
+.bg-swatch{
+  width:52px;height:52px;border-radius:10px;cursor:pointer;
+  border:2px solid transparent;transition:border-color .2s,transform .15s;
+  -webkit-tap-highlight-color:transparent;
+}
+.bg-swatch:active{transform:scale(.92)}
+.bg-swatch.active{border-color:#fff}
+.bg-label{
+  width:100%;text-align:center;color:rgba(255,255,255,.5);
+  font-size:11px;font-weight:600;letter-spacing:0.5px;margin-bottom:2px;
+}
 </style>
 </head>
 <body>
@@ -91,6 +131,18 @@ canvas{display:block}
   <button id="btn-retry">TAP TO RETRY</button>
 </div>
 
+<!-- Controls bar -->
+<div id="controls">
+  <button class="ctrl-btn" id="btn-music" title="Toggle Music">🎵</button>
+  <button class="ctrl-btn" id="btn-sfx" title="Toggle SFX">🔊</button>
+  <button class="ctrl-btn" id="btn-bg" title="Change Background">🎨</button>
+</div>
+
+<!-- Background picker -->
+<div id="bg-picker">
+  <div class="bg-label">BACKGROUNDS</div>
+</div>
+
 <script>
 // ═══════════════════════════════════════
 //  CANVAS
@@ -107,6 +159,329 @@ function resize() {
 }
 resize();
 window.addEventListener('resize', resize);
+
+// ═══════════════════════════════════════
+//  WEB AUDIO — MUSIC & SFX
+// ═══════════════════════════════════════
+let audioCtx = null;
+let musicEnabled = true;
+let sfxEnabled = true;
+let musicGain = null;
+let musicPlaying = false;
+let currentOscillators = [];
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  musicGain = audioCtx.createGain();
+  musicGain.gain.value = 0.12;
+  musicGain.connect(audioCtx.destination);
+}
+
+// ── Background Music ──
+// Chill lo-fi style loop using oscillators
+const MELODY_NOTES = [
+  // Bar 1
+  { note: 'E4', start: 0,    dur: 0.4 },
+  { note: 'G4', start: 0.5,  dur: 0.4 },
+  { note: 'A4', start: 1.0,  dur: 0.4 },
+  { note: 'B4', start: 1.5,  dur: 0.6 },
+  // Bar 2
+  { note: 'A4', start: 2.0,  dur: 0.4 },
+  { note: 'G4', start: 2.5,  dur: 0.4 },
+  { note: 'E4', start: 3.0,  dur: 0.6 },
+  { note: 'D4', start: 3.5,  dur: 0.4 },
+  // Bar 3
+  { note: 'C4', start: 4.0,  dur: 0.4 },
+  { note: 'E4', start: 4.5,  dur: 0.4 },
+  { note: 'G4', start: 5.0,  dur: 0.4 },
+  { note: 'A4', start: 5.5,  dur: 0.6 },
+  // Bar 4
+  { note: 'G4', start: 6.0,  dur: 0.4 },
+  { note: 'E4', start: 6.5,  dur: 0.4 },
+  { note: 'D4', start: 7.0,  dur: 0.6 },
+  { note: 'E4', start: 7.5,  dur: 0.4 },
+];
+
+const BASS_NOTES = [
+  { note: 'C2', start: 0, dur: 1.8 },
+  { note: 'A1', start: 2, dur: 1.8 },
+  { note: 'F1', start: 4, dur: 1.8 },
+  { note: 'G1', start: 6, dur: 1.8 },
+];
+
+const NOTE_FREQ = {
+  'C1':32.7,'D1':36.7,'E1':41.2,'F1':43.7,'G1':49.0,'A1':55.0,'B1':61.7,
+  'C2':65.4,'D2':73.4,'E2':82.4,'F2':87.3,'G2':98.0,'A2':110.0,'B2':123.5,
+  'C3':130.8,'D3':146.8,'E3':164.8,'F3':174.6,'G3':196.0,'A3':220.0,'B3':246.9,
+  'C4':261.6,'D4':293.7,'E4':329.6,'F4':349.2,'G4':392.0,'A4':440.0,'B4':493.9,
+  'C5':523.3,'D5':587.3,'E5':659.3,'F5':698.5,'G5':784.0,'A5':880.0,'B5':987.8,
+};
+
+const LOOP_LENGTH = 8; // seconds per loop
+
+function playMusicLoop() {
+  if (!audioCtx || !musicEnabled) return;
+  musicPlaying = true;
+
+  function scheduleLoop() {
+    if (!musicEnabled || !musicPlaying) return;
+    const now = audioCtx.currentTime + 0.05;
+
+    // Melody
+    MELODY_NOTES.forEach(n => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = NOTE_FREQ[n.note];
+      gain.gain.setValueAtTime(0, now + n.start);
+      gain.gain.linearRampToValueAtTime(0.15, now + n.start + 0.05);
+      gain.gain.linearRampToValueAtTime(0.08, now + n.start + n.dur * 0.5);
+      gain.gain.linearRampToValueAtTime(0, now + n.start + n.dur);
+      osc.connect(gain);
+      gain.connect(musicGain);
+      osc.start(now + n.start);
+      osc.stop(now + n.start + n.dur + 0.05);
+      currentOscillators.push(osc);
+    });
+
+    // Bass
+    BASS_NOTES.forEach(n => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = NOTE_FREQ[n.note];
+      gain.gain.setValueAtTime(0, now + n.start);
+      gain.gain.linearRampToValueAtTime(0.2, now + n.start + 0.1);
+      gain.gain.linearRampToValueAtTime(0, now + n.start + n.dur);
+      osc.connect(gain);
+      gain.connect(musicGain);
+      osc.start(now + n.start);
+      osc.stop(now + n.start + n.dur + 0.05);
+      currentOscillators.push(osc);
+    });
+
+    // Hi-hat pattern
+    for (let i = 0; i < 16; i++) {
+      const t = now + i * 0.5;
+      const bufSize = audioCtx.sampleRate * 0.04;
+      const buf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let j = 0; j < bufSize; j++) data[j] = (Math.random() * 2 - 1) * 0.3;
+      const src = audioCtx.createBufferSource();
+      const gain = audioCtx.createGain();
+      src.buffer = buf;
+      gain.gain.setValueAtTime(i % 2 === 0 ? 0.06 : 0.03, t);
+      gain.gain.linearRampToValueAtTime(0, t + 0.04);
+      src.connect(gain);
+      gain.connect(musicGain);
+      src.start(t);
+    }
+
+    // Clean up old oscillators
+    currentOscillators = currentOscillators.filter(o => {
+      try { return o.context.currentTime < now + LOOP_LENGTH + 1; } catch(e) { return false; }
+    });
+
+    // Schedule next loop
+    if (musicEnabled && musicPlaying) {
+      setTimeout(scheduleLoop, (LOOP_LENGTH - 0.3) * 1000);
+    }
+  }
+
+  scheduleLoop();
+}
+
+function stopMusic() {
+  musicPlaying = false;
+  currentOscillators.forEach(o => { try { o.stop(); } catch(e){} });
+  currentOscillators = [];
+}
+
+// ── Sound Effects ──
+function playSFX(type) {
+  if (!audioCtx || !sfxEnabled) return;
+  const now = audioCtx.currentTime;
+
+  if (type === 'place') {
+    // Short click/thud
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(300, now);
+    osc.frequency.exponentialRampToValueAtTime(80, now + 0.1);
+    gain.gain.setValueAtTime(0.3, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.15);
+  }
+
+  if (type === 'perfect') {
+    // Sparkle arpeggio
+    [523, 659, 784, 1047].forEach((f, i) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = f;
+      gain.gain.setValueAtTime(0, now + i * 0.06);
+      gain.gain.linearRampToValueAtTime(0.2, now + i * 0.06 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.06 + 0.3);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(now + i * 0.06);
+      osc.stop(now + i * 0.06 + 0.35);
+    });
+  }
+
+  if (type === 'gameover') {
+    // Descending sad tone
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(400, now);
+    osc.frequency.exponentialRampToValueAtTime(80, now + 0.6);
+    gain.gain.setValueAtTime(0.15, now);
+    gain.gain.linearRampToValueAtTime(0.1, now + 0.2);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.75);
+
+    // Low boom
+    const osc2 = audioCtx.createOscillator();
+    const gain2 = audioCtx.createGain();
+    osc2.type = 'sine';
+    osc2.frequency.setValueAtTime(80, now);
+    osc2.frequency.exponentialRampToValueAtTime(30, now + 0.5);
+    gain2.gain.setValueAtTime(0.3, now);
+    gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+    osc2.connect(gain2);
+    gain2.connect(audioCtx.destination);
+    osc2.start(now);
+    osc2.stop(now + 0.55);
+  }
+
+  if (type === 'slice') {
+    // Woosh/cut sound
+    const bufSize = audioCtx.sampleRate * 0.08;
+    const buf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufSize);
+    const src = audioCtx.createBufferSource();
+    const gain = audioCtx.createGain();
+    src.buffer = buf;
+    gain.gain.setValueAtTime(0.15, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+    src.connect(gain);
+    gain.connect(audioCtx.destination);
+    src.start(now);
+  }
+
+  if (type === 'combo') {
+    // Rising chime
+    const f = 600 + combo * 80;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(f, now);
+    osc.frequency.linearRampToValueAtTime(f * 1.2, now + 0.15);
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.3);
+  }
+}
+
+// ═══════════════════════════════════════
+//  BACKGROUNDS
+// ═══════════════════════════════════════
+const BACKGROUNDS = [
+  {
+    name: 'Deep Space',
+    colors: ['#0a0a1e', '#141432', '#1a1a2e'],
+    accent: '#4444aa',
+    stars: true,
+    nebula: false,
+    city: false,
+    aurora: false,
+    sunset: false,
+  },
+  {
+    name: 'Neon City',
+    colors: ['#0d0221', '#150734', '#1a0a3e'],
+    accent: '#ff00ff',
+    stars: true,
+    nebula: false,
+    city: true,
+    aurora: false,
+    sunset: false,
+  },
+  {
+    name: 'Aurora',
+    colors: ['#0a1628', '#0d2137', '#0a2a2a'],
+    accent: '#00ff88',
+    stars: true,
+    nebula: false,
+    city: false,
+    aurora: true,
+    sunset: false,
+  },
+  {
+    name: 'Sunset',
+    colors: ['#1a0a2e', '#2d1b4e', '#4a1942'],
+    accent: '#ff6633',
+    stars: false,
+    nebula: false,
+    city: false,
+    aurora: false,
+    sunset: true,
+  },
+  {
+    name: 'Nebula',
+    colors: ['#0a0520', '#1a0a3a', '#0d1a2e'],
+    accent: '#8844ff',
+    stars: true,
+    nebula: true,
+    city: false,
+    aurora: false,
+    sunset: false,
+  },
+  {
+    name: 'Ocean',
+    colors: ['#001220', '#002240', '#003355'],
+    accent: '#00aaff',
+    stars: false,
+    nebula: false,
+    city: false,
+    aurora: false,
+    sunset: false,
+    ocean: true,
+  },
+];
+
+let currentBG = parseInt(localStorage.getItem('stack_bg') || '0');
+
+// Create background swatches
+const pickerEl = document.getElementById('bg-picker');
+BACKGROUNDS.forEach((bg, i) => {
+  const swatch = document.createElement('div');
+  swatch.className = 'bg-swatch' + (i === currentBG ? ' active' : '');
+  const grad = `linear-gradient(135deg, ${bg.colors[0]}, ${bg.colors[1]}, ${bg.accent}44)`;
+  swatch.style.background = grad;
+  swatch.title = bg.name;
+  swatch.addEventListener('click', (e) => {
+    e.stopPropagation();
+    currentBG = i;
+    localStorage.setItem('stack_bg', i);
+    document.querySelectorAll('.bg-swatch').forEach((s,j) => s.classList.toggle('active', j===i));
+  });
+  pickerEl.appendChild(swatch);
+});
 
 // ═══════════════════════════════════════
 //  COLOR PALETTE — cycles with height
@@ -205,30 +580,31 @@ function updateShake(dt) {
 const BLOCK_HEIGHT = 28;
 const BASE_WIDTH = 160;
 const BASE_SPEED = 2.5;
-const PERFECT_THRESHOLD = 4; // pixels tolerance for "perfect"
+const PERFECT_THRESHOLD = 4;
 
-let stack = [];       // placed blocks: {x, w, colorIdx}
-let moving = null;    // current sliding block: {x, w, dir, speed, colorIdx}
-let falling = [];     // sliced-off pieces: {x, y, w, vy, colorIdx, side}
+let stack = [];
+let moving = null;
+let falling = [];
 let score = 0;
-let combo = 0;        // consecutive perfects
+let combo = 0;
 let bestScore = parseInt(localStorage.getItem('stack_best') || '0');
 let gameActive = false;
-let cameraY = 0;      // scrolls up as stack grows
+let cameraY = 0;
 let targetCamY = 0;
 let bgStars = [];
 
 // Init background stars
-for (let i = 0; i < 80; i++) {
+for (let i = 0; i < 120; i++) {
   bgStars.push({
     x: Math.random() * 2000,
     y: Math.random() * 8000 - 4000,
     size: 0.5 + Math.random() * 1.5,
     alpha: 0.2 + Math.random() * 0.5,
+    twinkleSpeed: 0.5 + Math.random() * 2,
   });
 }
 
-function baseY() { return H - 60; } // where the base sits on screen
+function baseY() { return H - 60; }
 
 function blockScreenY(idx) {
   return baseY() - (idx + 1) * BLOCK_HEIGHT + cameraY;
@@ -239,6 +615,9 @@ function currentSpeed() {
 }
 
 function startGame() {
+  initAudio();
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+
   stack = [];
   falling = [];
   particles = [];
@@ -247,10 +626,7 @@ function startGame() {
   cameraY = 0;
   targetCamY = 0;
 
-  // Base block
   stack.push({ x: (W - BASE_WIDTH) / 2, w: BASE_WIDTH, colorIdx: 0 });
-
-  // First moving block
   spawnMoving();
 
   gameActive = true;
@@ -258,6 +634,8 @@ function startGame() {
   document.getElementById('gameover').classList.add('hidden');
   document.getElementById('hud').classList.remove('hidden');
   updateHUD();
+
+  if (!musicPlaying && musicEnabled) playMusicLoop();
 }
 
 function spawnMoving() {
@@ -279,13 +657,11 @@ function dropBlock() {
   const prev = stack[stack.length - 1];
   const m = moving;
 
-  // Calculate overlap
   const overlapLeft = Math.max(m.x, prev.x);
   const overlapRight = Math.min(m.x + m.w, prev.x + prev.w);
   const overlapW = overlapRight - overlapLeft;
 
   if (overlapW <= 0) {
-    // Complete miss — game over
     falling.push({ x: m.x, y: blockScreenY(stack.length), w: m.w, vy: 0, colorIdx: m.colorIdx });
     moving = null;
     gameOver();
@@ -294,49 +670,45 @@ function dropBlock() {
 
   const overhang = m.w - overlapW;
 
-  // Perfect detection
   if (overhang <= PERFECT_THRESHOLD) {
-    // PERFECT — keep full width, snap to previous
     stack.push({ x: prev.x, w: prev.w, colorIdx: m.colorIdx });
     combo++;
-    score += 1 + combo; // bonus for streaks
+    score += 1 + combo;
 
-    // Juice!
     spawnPerfectBurst(blockScreenY(stack.length - 1) + BLOCK_HEIGHT / 2);
     triggerShake(3, 150);
     showPerfectText();
 
-    // Grow block slightly on long streaks (max original BASE_WIDTH)
+    playSFX('perfect');
+    if (combo >= 2) playSFX('combo');
+
     if (combo >= 3 && stack[stack.length-1].w < BASE_WIDTH) {
       stack[stack.length-1].w = Math.min(BASE_WIDTH, stack[stack.length-1].w + 4);
       stack[stack.length-1].x -= 2;
     }
   } else {
-    // Slice
     combo = 0;
     score++;
     stack.push({ x: overlapLeft, w: overlapW, colorIdx: m.colorIdx });
 
-    // Falling slice
     const col = hslColor(m.colorIdx);
     if (m.x < prev.x) {
-      // Overhangs left
       const sliceW = prev.x - m.x;
       falling.push({ x: m.x, y: blockScreenY(stack.length - 1), w: sliceW, vy: 0, colorIdx: m.colorIdx });
       spawnParticles(m.x, blockScreenY(stack.length - 1), sliceW, BLOCK_HEIGHT, hsl(col.h, col.s, col.l), 8);
     }
     if (m.x + m.w > prev.x + prev.w) {
-      // Overhangs right
       const sliceX = prev.x + prev.w;
       const sliceW = (m.x + m.w) - sliceX;
       falling.push({ x: sliceX, y: blockScreenY(stack.length - 1), w: sliceW, vy: 0, colorIdx: m.colorIdx });
       spawnParticles(sliceX, blockScreenY(stack.length - 1), sliceW, BLOCK_HEIGHT, hsl(col.h, col.s, col.l), 8);
     }
 
+    playSFX('place');
+    playSFX('slice');
     triggerShake(2, 80);
   }
 
-  // Camera
   if (stack.length > 5) {
     targetCamY = (stack.length - 5) * BLOCK_HEIGHT;
   }
@@ -349,6 +721,7 @@ function dropBlock() {
 function gameOver() {
   gameActive = false;
   triggerShake(8, 300);
+  playSFX('gameover');
 
   if (score > bestScore) {
     bestScore = score;
@@ -391,46 +764,181 @@ function drawBlock(x, y, w, h, colorIdx, alpha = 1) {
   const col = hslColor(colorIdx);
   ctx.globalAlpha = alpha;
 
-  // Top face (lighter)
   ctx.fillStyle = hsl(col.h, col.s, col.l + 12);
   ctx.fillRect(x, y, w, 6);
 
-  // Front face
   ctx.fillStyle = hsl(col.h, col.s, col.l);
   ctx.fillRect(x, y + 6, w, h - 6);
 
-  // Left edge (darker)
   ctx.fillStyle = hsl(col.h, col.s, col.l - 10);
   ctx.fillRect(x, y, 3, h);
 
-  // Right edge highlight
   ctx.fillStyle = hsl(col.h, col.s, col.l + 5);
   ctx.fillRect(x + w - 2, y, 2, h);
 
-  // Bottom shadow
   ctx.fillStyle = hsl(col.h, col.s, col.l - 15);
   ctx.fillRect(x, y + h - 2, w, 2);
 
   ctx.globalAlpha = 1;
 }
 
-function drawBackground() {
-  // Gradient background that shifts with height
-  const hueShift = (score * 3) % 360;
+function drawBackground(time) {
+  const bg = BACKGROUNDS[currentBG];
+
+  // Base gradient
   const grd = ctx.createLinearGradient(0, 0, 0, H);
-  grd.addColorStop(0, hsl((220 + hueShift) % 360, 40, 8));
-  grd.addColorStop(1, hsl((240 + hueShift) % 360, 50, 15));
+  grd.addColorStop(0, bg.colors[0]);
+  grd.addColorStop(0.5, bg.colors[1]);
+  grd.addColorStop(1, bg.colors[2]);
   ctx.fillStyle = grd;
   ctx.fillRect(0, 0, W, H);
 
   // Stars
-  for (const s of bgStars) {
-    const sy = ((s.y + cameraY * 0.3) % (H + 200)) - 100;
-    ctx.globalAlpha = s.alpha * 0.6;
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(s.x % W, sy, s.size, s.size);
+  if (bg.stars) {
+    for (const s of bgStars) {
+      const sy = ((s.y + cameraY * 0.3) % (H + 200)) - 100;
+      const twinkle = 0.5 + 0.5 * Math.sin(time * 0.001 * s.twinkleSpeed);
+      ctx.globalAlpha = s.alpha * 0.6 * twinkle;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(s.x % W, sy, s.size, s.size);
+    }
+    ctx.globalAlpha = 1;
   }
-  ctx.globalAlpha = 1;
+
+  // Neon City skyline
+  if (bg.city) {
+    ctx.globalAlpha = 0.3;
+    const cityY = H * 0.55;
+    const buildings = [
+      {x:0,w:40,h:120},{x:50,w:30,h:80},{x:90,w:50,h:160},{x:150,w:35,h:100},
+      {x:195,w:45,h:140},{x:250,w:30,h:70},{x:290,w:55,h:180},{x:355,w:40,h:110},
+      {x:405,w:35,h:90},{x:450,w:50,h:150},{x:510,w:30,h:65},{x:550,w:45,h:130},
+    ];
+    for (const b of buildings) {
+      const bx = b.x % W;
+      // Building
+      ctx.fillStyle = '#110022';
+      ctx.fillRect(bx, cityY + (180 - b.h), b.w - 3, b.h + 200);
+      // Windows
+      ctx.fillStyle = bg.accent;
+      for (let wy = cityY + (180 - b.h) + 8; wy < cityY + 180; wy += 12) {
+        for (let wx = bx + 4; wx < bx + b.w - 6; wx += 8) {
+          if (Math.random() > 0.3) {
+            ctx.globalAlpha = 0.15 + Math.random() * 0.2;
+            ctx.fillRect(wx, wy, 4, 6);
+          }
+        }
+      }
+    }
+    // Neon glow at base
+    ctx.globalAlpha = 0.08;
+    const neonGrd = ctx.createLinearGradient(0, H * 0.8, 0, H);
+    neonGrd.addColorStop(0, 'transparent');
+    neonGrd.addColorStop(1, bg.accent);
+    ctx.fillStyle = neonGrd;
+    ctx.fillRect(0, H * 0.8, W, H * 0.2);
+    ctx.globalAlpha = 1;
+  }
+
+  // Aurora
+  if (bg.aurora) {
+    ctx.globalAlpha = 0.12;
+    for (let i = 0; i < 5; i++) {
+      const ax = Math.sin(time * 0.0003 + i * 1.5) * W * 0.3 + W * 0.5;
+      const ay = H * 0.15 + i * 30;
+      const aGrd = ctx.createRadialGradient(ax, ay, 0, ax, ay, 200 + i * 30);
+      const hue = (120 + i * 40 + time * 0.01) % 360;
+      aGrd.addColorStop(0, `hsla(${hue},80%,60%,0.3)`);
+      aGrd.addColorStop(1, 'transparent');
+      ctx.fillStyle = aGrd;
+      ctx.fillRect(0, 0, W, H * 0.5);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Sunset
+  if (bg.sunset) {
+    const sunY = H * 0.45 + Math.sin(time * 0.0002) * 10;
+    // Sun
+    ctx.globalAlpha = 0.6;
+    const sunGrd = ctx.createRadialGradient(W * 0.5, sunY, 20, W * 0.5, sunY, 120);
+    sunGrd.addColorStop(0, '#ff8844');
+    sunGrd.addColorStop(0.4, '#ff664488');
+    sunGrd.addColorStop(1, 'transparent');
+    ctx.fillStyle = sunGrd;
+    ctx.fillRect(0, 0, W, H);
+
+    // Horizontal glow lines
+    ctx.globalAlpha = 0.08;
+    for (let i = 0; i < 8; i++) {
+      const ly = sunY + 30 + i * 15;
+      ctx.fillStyle = '#ff6633';
+      ctx.fillRect(0, ly, W, 2);
+    }
+
+    // Clouds
+    ctx.globalAlpha = 0.15;
+    for (let i = 0; i < 6; i++) {
+      const cx = (i * 120 + time * 0.01 * (i % 2 === 0 ? 1 : -0.5)) % (W + 200) - 100;
+      const cy = H * 0.2 + i * 40 + Math.sin(time * 0.0005 + i) * 10;
+      ctx.fillStyle = '#ff9966';
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, 60 + i * 10, 12, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Nebula
+  if (bg.nebula) {
+    ctx.globalAlpha = 0.06;
+    for (let i = 0; i < 4; i++) {
+      const nx = W * (0.2 + i * 0.2) + Math.sin(time * 0.0002 + i) * 50;
+      const ny = H * (0.2 + i * 0.15) + Math.cos(time * 0.0003 + i) * 30;
+      const nGrd = ctx.createRadialGradient(nx, ny, 0, nx, ny, 180);
+      const hue = (250 + i * 60 + time * 0.005) % 360;
+      nGrd.addColorStop(0, `hsla(${hue},70%,50%,0.5)`);
+      nGrd.addColorStop(1, 'transparent');
+      ctx.fillStyle = nGrd;
+      ctx.fillRect(0, 0, W, H);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Ocean
+  if (bg.ocean) {
+    // Waves
+    ctx.globalAlpha = 0.06;
+    for (let w = 0; w < 5; w++) {
+      ctx.beginPath();
+      const waveY = H * 0.5 + w * 40;
+      ctx.moveTo(0, waveY);
+      for (let x = 0; x <= W; x += 5) {
+        const y = waveY + Math.sin(x * 0.02 + time * 0.001 + w) * 15 +
+                  Math.sin(x * 0.005 + time * 0.0005) * 8;
+        ctx.lineTo(x, y);
+      }
+      ctx.lineTo(W, H);
+      ctx.lineTo(0, H);
+      ctx.closePath();
+      ctx.fillStyle = bg.accent;
+      ctx.fill();
+    }
+    // Light rays from above
+    ctx.globalAlpha = 0.03;
+    for (let r = 0; r < 5; r++) {
+      const rx = W * (0.1 + r * 0.2);
+      ctx.beginPath();
+      ctx.moveTo(rx - 10, 0);
+      ctx.lineTo(rx + 30, 0);
+      ctx.lineTo(rx + 60, H);
+      ctx.lineTo(rx - 40, H);
+      ctx.closePath();
+      ctx.fillStyle = '#88ccff';
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
 }
 
 let lastTime = 0;
@@ -439,7 +947,6 @@ function frame(time) {
   const dt = Math.min(time - (lastTime || time), 33);
   lastTime = time;
 
-  // Smooth camera
   cameraY += (targetCamY - cameraY) * 0.1;
 
   updateShake(dt);
@@ -448,13 +955,12 @@ function frame(time) {
   ctx.save();
   ctx.translate(shakeX, shakeY);
 
-  drawBackground();
+  drawBackground(time);
 
   // ── Draw base platform ──
   const baseScreenY = baseY();
   ctx.fillStyle = '#333';
   ctx.fillRect(0, baseScreenY + BLOCK_HEIGHT, W, H);
-  // Base subtle grid
   ctx.fillStyle = '#3a3a3a';
   for (let gx = 0; gx < W; gx += 20) {
     ctx.fillRect(gx, baseScreenY + BLOCK_HEIGHT, 1, H);
@@ -471,14 +977,12 @@ function frame(time) {
   // ── Draw moving block ──
   if (moving) {
     moving.x += moving.dir * moving.speed;
-    // Bounce
     if (moving.x + moving.w > W + 50) moving.dir = -1;
     if (moving.x < -50) moving.dir = 1;
 
     const my = blockScreenY(stack.length);
     drawBlock(moving.x, my, moving.w, BLOCK_HEIGHT, moving.colorIdx);
 
-    // Drop guide line (subtle)
     const prev = stack[stack.length - 1];
     ctx.globalAlpha = 0.08;
     ctx.fillStyle = '#fff';
@@ -520,6 +1024,44 @@ document.addEventListener('keydown', (e) => {
 
 document.getElementById('btn-play').addEventListener('click', startGame);
 document.getElementById('btn-retry').addEventListener('click', startGame);
+
+// ═══════════════════════════════════════
+//  CONTROL BUTTONS
+// ═══════════════════════════════════════
+const btnMusic = document.getElementById('btn-music');
+const btnSfx = document.getElementById('btn-sfx');
+const btnBg = document.getElementById('btn-bg');
+
+btnMusic.addEventListener('click', (e) => {
+  e.stopPropagation();
+  musicEnabled = !musicEnabled;
+  btnMusic.classList.toggle('off', !musicEnabled);
+  btnMusic.textContent = musicEnabled ? '🎵' : '🎵';
+  if (musicEnabled) {
+    initAudio();
+    if (!musicPlaying) playMusicLoop();
+  } else {
+    stopMusic();
+  }
+});
+
+btnSfx.addEventListener('click', (e) => {
+  e.stopPropagation();
+  sfxEnabled = !sfxEnabled;
+  btnSfx.classList.toggle('off', !sfxEnabled);
+  btnSfx.textContent = sfxEnabled ? '🔊' : '🔇';
+});
+
+btnBg.addEventListener('click', (e) => {
+  e.stopPropagation();
+  pickerEl.classList.toggle('show');
+});
+
+// Close picker when tapping elsewhere
+document.addEventListener('click', () => {
+  pickerEl.classList.remove('show');
+});
+pickerEl.addEventListener('click', (e) => e.stopPropagation());
 
 // Start render loop
 requestAnimationFrame(frame);
